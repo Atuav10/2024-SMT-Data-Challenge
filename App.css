@@ -1,0 +1,107 @@
+/* src/App.css */
+body {
+  background-color: #1c2833; /* Darker background color */
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  color: #ecf0f1; /* Light text color */
+  font-family: 'Roboto', sans-serif;
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  overflow: hidden; /* Prevent default scrolling */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.App {
+  background-color: #2c3e50; /* Darker background for form container */
+  background: linear-gradient(to right, rgba(44, 62, 80, 0.9), rgba(52, 73, 94, 0.9)); /* Gradient background */
+  padding: 40px;
+  border-radius: 20px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+  max-width: 600px;
+  width: 100%;
+  max-height: 100vh; /* Ensure the container does not exceed viewport height */
+  overflow-y: auto; /* Enable vertical scrolling */
+  text-align: center;
+  animation: fadeIn 1s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.submitted-data, .results {
+  background-color: rgba(44, 62, 80, 0.9);
+  padding: 20px;
+  border-radius: 10px;
+  margin-top: 20px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  animation: slideIn 1s ease-in-out;
+  font-family: 'Roboto', sans-serif; /* Submitted data font */
+  color: #ecf0f1;
+  
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.submitted-data p, .results p {
+  margin: 10px 0;
+  font-size: 1rem;
+}
+
+@media (max-width: 480px) {
+  .baseball-form-container {
+    padding: 10px;
+    margin: 0 auto;
+  }
+
+  .form-title {
+    font-size: 1.5em;
+    text-align: center;
+  }
+
+  .form-control {
+    width: 100%;
+    font-size: 1em;
+    padding: 10px;
+  }
+
+  .submit-button {
+    width: 100%;
+    font-size: 1.2em;
+    padding: 15px;
+    margin-top: 15px;
+  }
+
+  .baseball-image {
+    width: 50px;
+    height: 50px;
+  }
+
+  .results {
+    font-size: 1em;
+    padding: 10px;
+  }
+
+  .submitted-data p {
+    font-size: 1em;
+    margin-bottom: 10px;
+  }
+}

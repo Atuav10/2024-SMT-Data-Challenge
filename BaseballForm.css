@@ -1,0 +1,161 @@
+/* src/BaseballForm.css */
+body {
+  background-color: #1c2833; /* Darker background color */
+  background-image: url('https://example.com/baseball-field.jpg'); /* Use a proper URL to a baseball field image */
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  color: #ecf0f1; /* Light text color */
+  font-family: 'Roboto', sans-serif;
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  overflow: hidden; /* Prevent default scrolling */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.baseball-form-container {
+  background-color: #2c3e50; /* Darker background for form container */
+  background: linear-gradient(to right, rgba(44, 62, 80, 0.9), rgba(52, 73, 94, 0.9)); /* Gradient background */
+  padding: 40px;
+  border-radius: 20px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+  max-width: 600px;
+  width: 100%;
+  max-height: 100vh; /* Ensure the container does not exceed viewport height */
+  overflow-y: auto; /* Enable vertical scrolling */
+  text-align: center;
+  animation: fadeIn 1s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.form-title {
+  font-family: 'Oswald', sans-serif; /* Title font */
+  color: #ecf0f1; /* Light title color */
+  position: relative;
+  z-index: 1;
+  font-size: 2.5rem;
+  margin-bottom: 20px;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+  display: inline-block;
+}
+
+.form-label {
+  font-family: 'Roboto', sans-serif; /* Label font */
+  color: #ecf0f1; /* Light label color */
+  font-weight: bold;
+  font-size: 1rem;
+}
+.form-confidence{
+  color:#ecf0f1;
+  font-size: 0.75rem;
+  font-weight: 100;
+}
+
+.form-control {
+  background-color: #34495e; /* Darker input background */
+  color: #ecf0f1; /* Light input text */
+  border: 1px solid #2980b9; /* Blue border */
+  border-radius: 5px;
+  padding: 10px;
+  transition: border-color 0.3s, box-shadow 0.3s;
+  font-family: 'Roboto', sans-serif; /* Input font */
+}
+
+.form-control:focus {
+  border-color: #3498db;
+  box-shadow: 0 0 10px rgba(52, 152, 219, 0.5);
+}
+
+.submit-button {
+  background-color: #2980b9; /* Blue button background */
+  border: none;
+  padding: 10px 20px;
+  font-size: 1.2rem;
+  border-radius: 5px;
+  transition: background-color 0.3s, transform 0.3s;
+  margin-top: 20px;
+  font-family: 'Oswald', sans-serif; /* Button font */
+}
+
+.submit-button:hover {
+  background-color: #1f5a7a; /* Darker blue on hover */
+  transform: scale(1.05);
+}
+
+.baseball-image {
+  width: 50px;
+  height: 50px;
+  margin-left: 10px;
+  vertical-align: middle;
+  animation: bounce 2s infinite;
+}
+
+@keyframes bounce {
+  0%, 20%, 50%, 80%, 100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-10px);
+  }
+  60% {
+    transform: translateY(-5px);
+  }
+}
+
+.submitted-data {
+  background-color: rgba(44, 62, 80, 0.9);
+  padding: 20px;
+  border-radius: 10px;
+  margin-top: 20px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  animation: slideIn 1s ease-in-out;
+  font-family: 'Roboto', sans-serif; /* Submitted data font */
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.submitted-data p {
+  margin: 10px 0;
+  font-size: 1.2rem;
+}
+
+.player-image {
+  width: 100px;
+  height: auto;
+  margin-top: 20px;
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+.snell-image{
+  width: 125px;
+  height: auto;
+  margin-top: 5%;
+}
+.names{
+  color: white;
+}
+.submitting{
+  font-weight: 100;
+  font-size: small;
+}
