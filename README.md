@@ -10,7 +10,7 @@ The code for our project is housed in one singular RMarkdown file. We were unabl
 
 We have attached the paper we submitted to the competition. It contains a rigorous analysis of our project as well as the potential applications.
 
-## The Snell Tool Explained
+## [The Snell Tool](https://github.com/Atuav10/2024SMTDataChallenge/tree/main/user_interface)
 
 The app UI (shown below) consists of several key components, each serving a specific function to collect data, display results, and guide the user through the decision-making process. The UI is mobile-friendly, ensuring proper display on any device.
 
