@@ -1,5 +1,14 @@
-# Team-73-Snell-Tool-UI
-This repository houses the code for the Snell Tool UI we submitted to the SMT Baseball Analytics Competition.
+# Pitcher Dynamics xPLained - Creating a Model that Determines When to Pull a Starting Pitcher
+
+This repository houses our project submitted to the 2024 SMT Data Challenge. It consists of our final paper, the code for the project (in an html RMarkdown file), and our final paper.
+
+## [Code](https://github.com/Atuav10/2024SMTDataChallenge/blob/main/code/code.html)
+
+The code for our project is housed in one singular RMarkdown file. We were unable to publish the data. Simply download the file and you can understand how we went about our project.
+
+## [Paper](https://github.com/Atuav10/2024SMTDataChallenge/blob/main/paper.pdf)
+
+We have attached the paper we submitted to the competition. It contains a rigorous analysis of our project as well as the potential applications.
 
 ## The Snell Tool Explained
 
