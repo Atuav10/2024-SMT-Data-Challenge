@@ -1,0 +1,770 @@
+---
+title: "SMT Data Challenge product code"
+author: "Team 73 - Undergraduate division"
+date: "July/August 2024"
+output: 
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+<style>
+body {
+  border: 5px solid #00aa6c;
+  padding: 20px; /* Optional: Add padding inside the border */
+}
+</style>
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+This document will detail the code written for our project - "Pitcher Dynamics xPLained - Creating a Model that Determines When to Pull a Starting Pitcher". 
+<br>
+<br>
+Other important links:
+<br>
+User interface: https://www.snelltool.com/
+<br>
+Github for the UI: https://github.com/SMTDataSubmission/Team-73-Snell-Tool-UI
+
+## Initial data wrangling
+
+The first step is to load in the initial packages and set up our directory. We will be using the game info and game events data provided to us by SMT.
+```{r Reading in data, warning=TRUE, message=FALSE, error=TRUE, results="hide"}
+library(tidyverse)
+library(dplyr)
+library(mltools)
+library(zoo)
+library(caret)
+library(xgboost)
+library(vip)
+library(data.table)
+library(ggplot2)
+library(ggtext)
+library(gt)
+library(arrow) 
+
+data_directory <- '2024_SMT_Data_Challenge'
+
+game_info <- arrow::open_csv_dataset(paste0(data_directory,"/game_info"), 
+                                     partitioning = c("Season", "HomeTeam", "AwayTeam", "Day"), 
+                                     hive_style = F, 
+                                     unify_schemas = T, 
+                                     na = c("", "NA", "NULL", NA, "\\N"))
+
+
+
+game_events <- arrow::open_csv_dataset(paste0(data_directory,"/game_events"),
+                                       partitioning = c("Season", "HomeTeam", "AwayTeam", "Day"), 
+                                       hive_style = F, 
+                                       unify_schemas = T, 
+                                       na = c("", "NA", "NULL", NA, "\\N"))
+
+```
+Next, we read in the data and begin our initial data wrangling process. We load in all of our game info data. There is a glitch in the data where some of the innings have an inning of 0. We decide to remove all games where this occurs. Even if it occurs only once. 
+
+Additionally, we were given two folders of data. "Season_1883" is the first part of the season and "Season_1884" is the second part of the season. Season_1884 has more complete data, so we chose to just stick with that folder.
+```{r Initial data wrangling}
+#The following code will give us access to the information of every single game in this specific minor league system.
+data <- game_info %>%
+  collect()
+
+#Identifying the game ids
+games_with_inning_zero <- data %>%
+  filter(inning == 0) %>%
+  pull(game_str) %>%
+  unique()
+
+#And removing the game ids from our data
+data_without_zero <- data %>%
+  filter(!game_str %in% games_with_inning_zero)
+
+#Doing some checks to make sure our code ran correctly
+t <- data_without_zero %>%
+  group_by(game_str) %>%
+  arrange(play_per_game) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+t <- filter(t, inning != 1)
+
+data_without_zero <- data_without_zero %>%
+  filter(!game_str %in% t)
+
+
+
+data_1884 <- data_without_zero %>%
+  group_by(game_str) %>%
+  arrange(play_per_game, at_bat) %>%
+  filter(any(inning == 1 & play_per_game == 1))
+
+#Only using data from the Season_1884 folder
+data_1884 <- filter(data_1884, Season == "Season_1884")
+head(data_1884) %>%
+  gt()
+```
+
+## Creating the outs metric
+
+Now that all the data has been properly wrangled, it is time to create the outs metric. We were **not given** outs data, so we decided to analyze baserunner situations between at-bats to infer if there was an out or not. We started with basic plays and worked our way up to double and triple plays. Keep in mind that this metric won't be perfect. There are instances that we don't know for sure if an out occured based on the information we have.
+
+Our way of validating this metric was to create an "outs checker" variable which showed the total number of outs recorded in the inning. If the out checker was at three outs, we assumed the metric was working properly. If the out checker read something other than three outs, then we knew our outs checker was not working properly.
+
+The following 100+ lines of code detail the specific instances where we recognized an out occured. 
+```{r Creating the outs metric}
+# First, the last at bat before the inning is always out.
+gi_test <- data_1884 %>%
+  group_by(game_str, inning, top_bottom) %>%
+  mutate(out = ifelse(row_number() ==n(), 1, 0)) %>%
+  ungroup()
+
+#We are going to create a dummy variable that shows the last pitch in the inning.
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom) %>%
+  mutate(last_pitch_in_inning = ifelse(row_number() ==n(), 1, 0)) %>%
+  ungroup()
+
+# Next if the base runners in the next at-bat are the same as the base runners in the current at-bat, then an out occurred (except for a home run which we will account for later). Before we do this though, a couple steps need to be done.
+
+# 1) Create some helper variables - This shows the lead play - What are the base runners for the next at bat?
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom) %>%
+  mutate(next_first_baserunner = lead(first_baserunner)) %>%
+  mutate(next_second_baserunner = lead(second_baserunner)) %>%
+  mutate(next_third_baserunner = lead(third_baserunner)) %>%
+  ungroup()
+
+# 2) This is to show the last pitch of an at bat. This is the pitch where the out or not out will occur
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom, at_bat) %>%
+  mutate(last_pitch = ifelse(row_number() == n(), 1, 0)) %>%
+  ungroup()
+
+# 3) Changing NAs to "empty" - Because it is annoying to deal with NAs.
+gi_test$first_baserunner[is.na(gi_test$first_baserunner)] <- "empty"
+gi_test$second_baserunner[is.na(gi_test$second_baserunner)] <- "empty"
+gi_test$third_baserunner[is.na(gi_test$third_baserunner)] <- "empty"
+gi_test$next_first_baserunner[is.na(gi_test$next_first_baserunner)] <- "empty"
+gi_test$next_second_baserunner[is.na(gi_test$next_second_baserunner)] <- "empty"
+gi_test$next_third_baserunner[is.na(gi_test$next_third_baserunner)] <- "empty"
+
+# Now we can identify the out for the situation mentioned above.
+gi_test <- gi_test %>%
+  mutate(
+    out = ifelse(
+      first_baserunner == next_first_baserunner &
+        second_baserunner == next_second_baserunner &
+        third_baserunner == next_third_baserunner,
+      1, 
+      out
+    )
+  )
+
+# Making it so only the last pitch matters for the out. Batters cannot be out in the middle of an at-bat.
+gi_test$out <- ifelse(gi_test$last_pitch == 0, NA, gi_test$out)
+
+#Outs counter variable just to see how well we're doing.
+gi_test <- gi_test %>%
+  group_by(game_str, inning) %>%
+  mutate(temp_out = ifelse(is.na(out), 0, out),  
+         outs_in_inning = cumsum(temp_out)) %>%
+  select(-temp_out) %>%  
+  ungroup()
+
+# Next, if the batter does not show up as a base runner on the next at bat, then they got out (unless they hit a home run, but that will be accounted for).
+gi_test <- gi_test %>%
+  mutate(out = ifelse(batter != next_first_baserunner & batter != next_second_baserunner & batter != next_third_baserunner, 1, out))
+
+#Simple double play - The scenario where it is a man on first and the next at bat there is no one on - This will either be a double play or a home run. We will correct for home run later
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & first_baserunner != "empty" & second_baserunner == "empty" & third_baserunner == "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == "empty", 2,out))
+
+#simple fielder's choice - Man on first, no one on second or third. The next at-bat, the player at the previous at-bat replaces the player at first base. 99% of cases, this is a fielder's choice
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & first_baserunner != "empty" & second_baserunner == "empty" & third_baserunner == "empty" & next_first_baserunner != "empty" & next_first_baserunner != first_baserunner & next_second_baserunner == "empty" & next_third_baserunner == "empty", 1,out))
+
+#Complex double play - Man on first and second - Runner on second advances to third, runner on first and second are empty
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & first_baserunner != "empty" & second_baserunner != "empty" & third_baserunner == "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == second_baserunner, 2,out))
+
+
+#Inning ending double play
+gi_test <- gi_test %>%
+  mutate(out = ifelse(lag(outs_in_inning) == 1 & last_pitch_in_inning == 1, 2, out))
+gi_test$out <- ifelse(gi_test$last_pitch == 0, NA, gi_test$out)
+
+#Inning ending triple play
+gi_test <- gi_test %>%
+  mutate(out = ifelse(lag(outs_in_inning) == 0 & last_pitch_in_inning == 1, 3, out))
+gi_test$out <- ifelse(gi_test$last_pitch == 0, NA, gi_test$out)
+
+#outcounter again with the inning ending double play taken into account
+gi_test <- gi_test %>%
+  group_by(game_str, inning, top_bottom) %>%
+  mutate(temp_out = ifelse(is.na(out), 0, out),
+         outs_in_inning = cumsum(temp_out)) %>%
+  select(-temp_out) %>% 
+  ungroup()
+
+#Complex double play - Runner on first and second, next at-bat, runners are empty - This could also be a triple play but we will figure that out later. 
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & last_pitch == 1 & first_baserunner != "empty" & second_baserunner != "empty" & third_baserunner == "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == "empty", 2,out))
+
+# Complex double play - Runners on first and third, next at-bat, runners are empty
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & last_pitch == 1 & first_baserunner != "empty" & second_baserunner == "empty" & third_baserunner != "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == "empty", 2,out))
+
+# Complex double play - Runners on first, second, ad third, next at bat, the guy on second moves to third
+gi_test <- gi_test %>%
+  mutate(out = ifelse(last_pitch_in_inning != 1 & last_pitch == 1 & first_baserunner != "empty" & second_baserunner != "empty" & third_baserunner != "empty" & next_first_baserunner == "empty" & next_second_baserunner == "empty" & next_third_baserunner == second_baserunner, 2,out))
+
+# Add in home runs - The game_events folder gives us a code for when a home run occurred (event_code == 11).
+game_events_hr <- game_events %>% 
+  filter(event_code == 11) %>%
+  collect()
+home_runs <- select(game_events_hr, game_str, at_bat, event_code)
+
+#Join the home run data to our existing data. If a home run occured in an at-bat, then we will know.
+gi_test <- left_join(gi_test, home_runs, by =c("game_str", "at_bat"))
+
+#Converting home run to a binary variable called "is_homerun".
+gi_test <- gi_test %>%
+  mutate(event_code = ifelse(event_code == 11, 1, 0)) %>%
+  rename(is_homerun = event_code)
+gi_test$is_homerun[is.na(gi_test$is_homerun)] <- 0
+
+#Making sure that if a home run occurred, then an out did not occur.
+gi_test <- gi_test %>%
+  mutate(out = ifelse(is_homerun == 1, 0, out))
+
+#Just to ensure that the last pitch in the inning is not being double counted for an out.I also create another variable to store the data, calling it "gi_test2".
+gi_test2 <- gi_test %>%
+  group_by(game_str, inning, top_bottom) %>%
+  arrange(game_str, inning, top_bottom, play_per_game) %>% 
+  mutate(out = ifelse(lag(outs_in_inning) == 2 & last_pitch_in_inning == 1, 1, out)) %>%
+  mutate(out = ifelse(lag(outs_in_inning) == 1 & last_pitch_in_inning == 1, 2, out)) %>%
+  mutate(out = ifelse(lag(outs_in_inning) == 0 & last_pitch_in_inning == 1, 3, out)) %>%
+  ungroup()
+
+#Making sure, once again, that only the last pitch in an inning accounts for an out.
+gi_test2$out <- ifelse(gi_test2$last_pitch == 0, NA, gi_test2$out)
+
+
+
+#Re-running the outs checker
+gi_test2 <- gi_test2 %>%
+  group_by(game_str, inning, top_bottom) %>%
+  mutate(temp_out = ifelse(is.na(out), 0, out), 
+         outs_in_inning = cumsum(temp_out)) %>%
+  select(-temp_out) %>%  
+  ungroup()
+gi_test2 <- gi_test2 %>%
+  group_by(game_str, inning, top_bottom) %>%
+  mutate(outs_check = sum(out, na.rm =TRUE)) %>%
+  ungroup()
+```
+
+How well did our model perform? Answer: Pretty well!
+```{r Data1122}
+
+checker <- gi_test2 %>%
+  group_by(game_str, inning, top_bottom) %>%
+  summarize(outs = mean(outs_check))
+
+table(checker$outs) 
+```
+Of the 4086 innings we examined, 3889 of them came back with three outs which is accurate to our satisfaction. We also examined several innings to make sure the outs in the inning passed the eye test - it did.
+
+## Preparing data for XGBoost
+
+Now that the outs model has been created, some more data preparation needs to be done. This includes filtering the data to only include starting pitchers, removing games that have an inaccurate out tally, etc.
+```{r Preparing data for the xgboost models}
+#Getting only the home team data
+wrangled_data <- filter(gi_test2, top_bottom == "top")
+
+#We want to get all of the data up to the last full inning that the pitcher pitched in, because we want an accurate number of pitches left in the inning. This may take a bit of work.
+
+#Step 1: Identify the starting pitchers in every game.
+filtered_data <- wrangled_data %>%
+  group_by(game_str) %>%
+  arrange(play_per_game) %>%
+  filter(pitcher == first(pitcher)) %>%
+  ungroup()
+
+#Step 2: Find the last inning these pitchers pitched in, creating a last inning variable
+last_inning_data <- filtered_data %>%
+  group_by(game_str) %>%
+  summarise(last_inning = max(inning)) %>%
+  ungroup()
+
+# Step 3: Add the variable to the previous data
+inprogress <- left_join(wrangled_data, last_inning_data, by = c("game_str"))
+
+# Step 4: Only get data from that last inning and before
+inprogress <- inprogress %>%
+  group_by(game_str) %>%
+  filter(inning <= last_inning) %>%
+  ungroup()
+
+#Next, we identify the specific games that included innings where our outs checker did NOT have three outs
+test1 <- inprogress %>%
+  filter(outs_check != 3) %>%
+  pull(game_str) %>%
+  unique()
+
+#And we eliminate these games from our dataset.
+test2 <- inprogress %>%
+  filter(!game_str %in% test1)
+
+
+```
+Next, we need to add some more variables that will be necessary in our xgboost models. This includes pitch count, pitches in inning, pitches left in the game, pitches left in the inning, and position in the batting order. 
+
+We are also introducing our "difficulty" metric which rates a pitcher's situation based on outs in inning and baserunner situation. This was based on 2022 MLB data that we then scaled on a scale of 0-100.
+```{r Preparing data for the xgboost models - Part 2}
+#Pitches in inning
+test2 <- test2 %>%
+  group_by(game_str, inning) %>%
+  mutate(inning_count = row_number()) %>%
+  ungroup()
+
+#Pitches left in inning
+test2 <- test2 %>%
+  group_by(game_str, inning) %>%
+  mutate(pitches_left_in_inning = n() - row_number())
+
+
+test2 <- test2 %>%
+  group_by(game_str) %>%
+  arrange(play_per_game) %>%
+  filter(pitcher == first(pitcher)) %>%
+  ungroup()
+
+#Pitch count
+testing <- test2 %>%
+  group_by(game_str, pitcher) %>%  
+  mutate(pitch_count = row_number()) %>%
+  ungroup() 
+
+#Pitches left in game
+testing <- testing %>%
+  group_by(game_str) %>%
+  mutate(pitches_left_in_game = n() - row_number()) %>%
+  ungroup()
+
+#Time to create our difficulty metric.
+
+#Step 1: identify the baserunner situations
+testing$is_000 <- ifelse(testing$first_baserunner == "empty" & testing$second_baserunner == "empty" & testing$third_baserunner == "empty", 1, 0)
+testing$is_100 <- ifelse(testing$first_baserunner != "empty" & testing$second_baserunner == "empty" & testing$third_baserunner == "empty", 1, 0)
+testing$is_010 <- ifelse(testing$first_baserunner == "empty" & testing$second_baserunner != "empty" & testing$third_baserunner == "empty", 1, 0)
+testing$is_001 <- ifelse(testing$first_baserunner == "empty" & testing$second_baserunner == "empty" & testing$third_baserunner != "empty", 1, 0)
+testing$is_110 <- ifelse(testing$first_baserunner != "empty" & testing$second_baserunner != "empty" & testing$third_baserunner == "empty", 1, 0)
+testing$is_011 <- ifelse(testing$first_baserunner == "empty" & testing$second_baserunner != "empty" & testing$third_baserunner != "empty", 1, 0)
+testing$is_111 <- ifelse(testing$first_baserunner != "empty" & testing$second_baserunner != "empty" & testing$third_baserunner != "empty", 1, 0)
+testing$is_101 <- ifelse(testing$first_baserunner != "empty" & testing$second_baserunner == "empty" & testing$third_baserunner != "empty", 1, 0)
+
+#Step 2: Convert each of these nine situations to a difficulty value. Nine situations * three outs = 27 unique situations.
+
+testing <- testing %>%
+  mutate(difficulty = ifelse(is_000 == 1 & outs_in_inning == 0, 20.110, 0)) %>%
+  mutate(difficulty = ifelse(is_000 == 1 & outs_in_inning == 1, 10.731, difficulty)) %>%
+  mutate(difficulty = ifelse(is_000 == 1 & outs_in_inning == 2, 4.098, difficulty)) %>%
+  mutate(difficulty = ifelse(is_100 == 1 & outs_in_inning == 0, 36.544, difficulty)) %>%
+  mutate(difficulty = ifelse(is_100 == 1 & outs_in_inning == 1, 21.462, difficulty)) %>%
+  mutate(difficulty = ifelse(is_100 == 1 & outs_in_inning == 2, 8.661, difficulty)) %>%
+  mutate(difficulty = ifelse(is_010 == 1 & outs_in_inning == 0, 45.332, difficulty)) %>%
+  mutate(difficulty = ifelse(is_010 == 1 & outs_in_inning == 1, 28.179, difficulty)) %>%
+  mutate(difficulty = ifelse(is_010 == 1 & outs_in_inning == 2, 13.012, difficulty)) %>%
+  mutate(difficulty = ifelse(is_001 == 1 & outs_in_inning == 0, 53.739, difficulty)) %>%
+  mutate(difficulty = ifelse(is_001 == 1 & outs_in_inning == 1, 41.149, difficulty)) %>%
+  mutate(difficulty = ifelse(is_001 == 1 & outs_in_inning == 2, 15.927, difficulty)) %>%
+  mutate(difficulty = ifelse(is_110 == 1 & outs_in_inning == 0, 60.625, difficulty)) %>%
+  mutate(difficulty = ifelse(is_110 == 1 & outs_in_inning == 1, 38.107, difficulty)) %>%
+  mutate(difficulty = ifelse(is_110 == 1 & outs_in_inning == 2, 18.589, difficulty)) %>%
+  mutate(difficulty = ifelse(is_011 == 1 & outs_in_inning == 0, 84.706, difficulty)) %>%
+  mutate(difficulty = ifelse(is_011 == 1 & outs_in_inning == 1, 58.724, difficulty)) %>%
+  mutate(difficulty = ifelse(is_011 == 1 & outs_in_inning == 2, 23.152, difficulty)) %>%
+  mutate(difficulty = ifelse(is_101 == 1 & outs_in_inning == 0, 74.060, difficulty)) %>%
+  mutate(difficulty = ifelse(is_101 == 1 & outs_in_inning == 1, 48.458, difficulty)) %>%
+  mutate(difficulty = ifelse(is_101 == 1 & outs_in_inning == 2, 21.462, difficulty)) %>%
+  mutate(difficulty = ifelse(is_111 == 1 & outs_in_inning == 0, 100.000, difficulty)) %>%
+  mutate(difficulty = ifelse(is_111 == 1 & outs_in_inning == 1, 63.709, difficulty)) %>%
+  mutate(difficulty = ifelse(is_111 == 1 & outs_in_inning == 2, 32.404, difficulty))
+
+#Now, we create a batting order variable
+
+#Impute the batter id to get rid of NAs. This passed the eye test.
+testing$batter <- na.locf(testing$batter, fromLast = TRUE)
+
+#Essentially iterate the batters 1-9 and repeat
+ready_data <- testing %>%
+  group_by(game_str) %>%
+  mutate(
+    hitter_number = cumsum(batter != lag(batter, default = first(batter))) + 1
+  ) %>%
+  mutate(
+    hitter_number = (hitter_number - 1) %% 9 + 1
+  ) %>%
+  ungroup()
+```
+## Model 1 - xPLG
+Now that our variables have been created, it is time to create the first xgboost model - The Expected Pitches Left in the Game. 
+```{r Expected Pitches Left in the Game (xPLG) model}
+#Load in the packages
+
+
+#Only taking the columns we care about - Our label variable is the variable we are trying to predict.
+xplg <- ready_data %>%
+  select(label = pitches_left_in_game, home_team, pitch_count, inning_count, difficulty, hitter_number)
+
+head(xplg) %>%
+  gt()
+```
+We now need to figure out the type of every variable (numeric, character, factor, etc.). We don't want any character variable.
+
+```{r Expected Pitches Left in the Game (xPLG) model111111}
+
+str(xplg) 
+
+#We have to turn these variables into factor variables so our algorithm can properly read it
+xplg$home_team <- as.factor(xplg$home_team)
+xplg$hitter_number <- as.factor(xplg$hitter_number)
+xplg$label <- as.integer(xplg$label)
+
+#This transforms each factor variable into their individual binary dummy variables.
+dmy <- dummyVars(" ~ .", data = xplg)
+#Now, let's convert the dataframe to a matrix
+xplg_final <- data.frame(predict(dmy, newdata = xplg))
+
+# Making training and testing datasets - 80/20 splits
+smp_size <- floor(0.80 * nrow(xplg_final))
+set.seed(617) #It was always Celtics in 5
+#indices - Which rows are train which is test
+indices <- sample(seq_len(nrow(xplg_final)), size = smp_size) 
+
+train <- as.matrix(xplg_final[indices, ]) 
+test <- as.matrix(xplg_final[-indices, ])
+```
+With the training and testing datasets created, it is time to conduct the xgboost model. The number of rounds we conduct is identified through 5-fold cross validation and the rest of the parameters were defined through trial and error.
+```{r Actual xPLG, warning=TRUE, results = 'hide', message=FALSE, error=TRUE, results="hide"}
+#Now we run the xgboost model on the training dataset
+xplg_model <-
+  xgboost(
+    data = train[, 2:17],
+    label = train[, 1],
+    nrounds = 134,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 3,
+    max_depth = 6,
+    eta = .18
+  )   
+
+# We will now conduct a 5-fold cross validation to determine the proper number of rounds and trial and error to determine the best max_depth and eta.
+set.seed(617)
+cv_model <- xgb.cv(
+  data = train[, 2:17],
+  label = train[, 1],
+  nrounds = 1000,           
+  nfold = 5,                
+  objective = "reg:squarederror",  
+  early_stopping_rounds = 10, 
+  max_depth = 6,
+  eta = 0.1,                
+  eval_metric = "rmse",     
+  verbose = 1               
+)
+```
+What were the results of the model? 
+```{r Expected Pitches Left in the Inning (xPLI) model - 2}
+
+#Seeing a table of the importance of every variable
+xgb.importance(model = xplg_model) %>%
+  gt()
+
+
+#Now we fit the model we trained on the training dataset onto the testing dataset.
+pred_xgb <- predict(xplg_model, test[, 2:17])
+```
+We have fit the model onto the test dataset. This is the root mean-squared error.
+```{r RMSE}
+
+# Seeing our RMSE
+yhat <- pred_xgb
+y <- test[, 1]
+postResample(yhat, y) 
+
+#Converting the values into a dataframe
+pitches_left_in_game <- as.data.frame(
+  matrix(predict(xplg_model, as.matrix(xplg_final %>% select(-label))))
+) %>%
+  dplyr::rename(xPLG = V1)
+```
+And now we join the observed xPLG values with the corresponding entry.
+```{r Joining}
+joined_data_placeholder <- cbind(xplg, pitches_left_in_game)
+
+#Difference between actual and expected
+joined_data_placeholder$difference <- joined_data_placeholder$label - joined_data_placeholder$xPLG
+```
+Here is a visualization of the important features in our **xPLG** model that we showed as a table earlier.
+<br>
+<br>
+```{r xplg_graph, echo=FALSE}
+knitr::include_graphics("xplg__importance.png", error = FALSE )
+```
+<br>
+<br>
+And here is a visualization of both the **xPLG** and the actual pitches left in the game.
+<br>
+<br>
+```{r xplg_importance, echo=FALSE}
+knitr::include_graphics("xplg_final.png", error = FALSE )
+```
+
+## Model 2 - xPLI
+
+Now we do the same thing for our next model - The expected pitches left in the inning. The only difference is our label (outcome) variable changes from pitches left in the game to pitches left in the inning. 
+```{r Creating the xPLI model}
+xpli <- ready_data %>%
+  select(label = pitches_left_in_inning, home_team, pitch_count, inning_count, difficulty, hitter_number)
+
+head(xpli) %>%
+  gt()
+```
+Now we convert necessary variables to factors.
+```{r Creating the xPLI model2}
+str(xpli) 
+xpli$home_team <- as.factor(xpli$home_team)
+xpli$hitter_number <- as.factor(xpli$hitter_number)
+xpli$label <- as.integer(xpli$label)
+dmy_2 <- dummyVars(" ~ .", data = xpli)
+xpli_final <- data.frame(predict(dmy_2, newdata = xpli))
+str(xpli_final)
+
+smp_size_2 <- floor(0.80 * nrow(xpli_final))
+set.seed(617) 
+indices_2 <- sample(seq_len(nrow(xpli_final)), size = smp_size) 
+train_2 <- as.matrix(xpli_final[indices, ]) 
+test_2 <- as.matrix(xpli_final[-indices, ])
+```
+Time to conduct the xPLI model. Keep in mind the parameters of the xPLI model will ne different from the xPLG model - It all depends on optimizing RMSE.
+```{r Actual xPLI, warning=TRUE, results = 'hide', message=FALSE, error=TRUE, results="hide"}
+xpli_model <-
+  xgboost(
+    data = train_2[, 2:17],
+    label = train_2[, 1],
+    nrounds = 230,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 3,
+    max_depth = 6,
+    eta = .18
+  )   
+
+set.seed(617)
+cv_model2 <- xgb.cv(
+  data = train_2[, 2:17],
+  label = train_2[, 1],
+  nrounds = 1000,           
+  nfold = 5,                
+  objective = "reg:squarederror",  
+  early_stopping_rounds = 10, 
+  max_depth = 6,
+  eta = 0.1,                
+  eval_metric = "rmse",     
+  verbose = 1               
+)
+```
+Let's look at the important factors and once again fit the model onto the test dataset.
+```{r Continued xPLI analysis}
+xgb.importance(model = xpli_model) %>%
+  gt()
+
+pred_xgb_2 <- predict(xpli_model, test_2[, 2:17])
+```
+Finding the RMSE.
+```{r Continued xPLI analysis111222}
+yhat_2 <- pred_xgb_2
+y_2 <- test_2[, 1]
+postResample(yhat_2, y_2) 
+
+pitches_left_in_inning <- as.data.frame(
+  matrix(predict(xpli_model, as.matrix(xpli_final %>% select(-label))))
+) %>%
+  dplyr::rename(xPLI = V1)
+```
+And now we join the xPLI values with their corresponding entries.
+```{r Continued xPLI analysis1112222}
+joined_xpli <- cbind(xpli_final, pitches_left_in_inning)
+```
+Here is a visualization of the important features in our **xPLI** model.
+<br>
+<br>
+```{r xpli_graph, echo=FALSE}
+knitr::include_graphics("xpli__importance.png", error = FALSE )
+```
+<br>
+<br>
+And here is a visualization of both the **xPLI** and the actual pitches left in the game.
+<br>
+<br>
+```{r xplid, echo=FALSE}
+knitr::include_graphics("xpli_final.png", error = FALSE )
+```
+
+## Analyzing the data
+
+Next, we join the xPLI and xPLG values with the original data We now have the xPLI and xPLG metrics for every observation, how do we determine when to pull the pitcher? Well, we decided if the xPLG was less than the xPLI, then it would be time to pull the pitcher. If the pitcher does not have enough juice to make it through the inning, they should be pulled.
+```{r Analyzing data}
+all_data <- cbind(joined_data_placeholder, pitches_left_in_inning)
+
+expected_values <- select(all_data, xPLG, xPLI)
+final_data <- cbind(ready_data, expected_values)
+
+#Putting out our recommendation
+final_data <- final_data %>%
+  mutate(pull_pitcher = ifelse(xPLG < xPLI, 1, 0))
+
+final_data <- final_data %>%
+  group_by(game_str) %>%
+  mutate(actual_pulling = ifelse(row_number() == n(), 1, 0)) %>%
+  ungroup()
+
+#Creating another metric to show around how close a pitcher is to getting pulled.
+final_data <- final_data %>%
+  mutate(expected_difference = xPLG - xPLI)
+```
+How successful was the model? As the below table shows, pretty successful.
+<br>
+<br>
+```{r table1, echo=FALSE, out.width='30%', out.height='30%'}
+knitr::include_graphics("table1.png", error = FALSE )
+```
+<br>
+<br>
+Next, we wanted to see how hard teams worked their pitchers, so we created a metric called "pitches over expected" or poe for short. We ended up finding out that pitchers tended to be overworked, going beyond our model's recommendations.
+```{r Success_rate, warning=TRUE, results = 'hide', message=FALSE, error=TRUE, results="hide"}
+#Creating the Poe variable - If there is no pulling involved, we put an NA value in the column so it is easy to summarize
+test123 <- final_data %>%
+  group_by(game_str) %>%
+  mutate(
+    poe = ifelse(pull_pitcher == 1 & actual_pulling == 0, pitches_left_in_game, NA)) %>%
+  mutate(
+    poe = ifelse(is.na(poe) & pull_pitcher == 0 & actual_pulling == 1, -xPLG, poe)) %>%
+  mutate(
+    poe = ifelse(is.na(poe) & pull_pitcher == 1 & actual_pulling == 1, 0, poe)) %>%
+  ungroup()
+
+#We only want to look at the FIRST recommendation
+retain_first_numeric <- function(x) {
+  # Identify positions of non-NA numeric values
+  numeric_positions <- which(!is.na(x) & is.numeric(x))
+  
+  # Create a logical vector for replacement
+  retain <- rep(NA, length(x))
+  if(length(numeric_positions) > 0) {
+    retain[numeric_positions[1]] <- x[numeric_positions[1]]
+  }
+  retain
+}
+
+
+# Apply the function to each group
+result <- test123 %>%
+  group_by(game_str) %>%
+  mutate(poe = retain_first_numeric(poe)) %>%
+  ungroup()
+mean_poe <- mean(result$poe, na.rm = T)
+sd_poe <- sd(result$poe, na.rm = T)
+
+#Filtering out outliers
+filtered_result <- filter(result, result$poe < mean_poe + 2*sd_poe & result$poe > mean_poe - 2*sd_poe)
+
+#Let's look at the poe of every pitching outing and see what it tells us.
+pitchers <- filtered_result %>%
+  group_by(pitcher, HomeTeam) %>%
+  summarize (poe = mean(poe, na.rm = T))
+```
+And here is the visualization of pitcher outings. As we can see, pitchers tend to be overworked more often than not.
+<br>
+<br>
+```{r histogram, echo=FALSE}
+knitr::include_graphics("overworked_again.png", error = FALSE )
+```
+<br>
+<br>
+This is confirmed as majority of pitchers are overworked in the minor leagues.
+<br>
+<br>
+```{r overworked, echo=FALSE}
+knitr::include_graphics("starts.png", error = FALSE )
+```
+<br>
+<br>
+Now let's look at how overworked pitchers are on a team level.
+```{r Team}
+#Create a variable that shows if pitchers were overworked or underworked
+filtered_result$diff <- ifelse(filtered_result$poe > 0 | filtered_result$poe == 0, 1, 0)
+
+#Now do teams, on average, overwork their pitchers? Answer: Yes.
+teams <- filtered_result %>%
+  group_by(HomeTeam) %>%
+  summarize (poe = mean(poe, na.rm = T))
+
+```
+<br>
+```{r table2, echo=FALSE, out.width='50%', out.height='50%'}
+knitr::include_graphics("table2.png", error = FALSE )
+
+```
+<br>
+<br>
+As we can see, all levels of the farm system tend to overwork their pitchers.
+
+## Preparing data for the UI
+
+Lastly, we need to fit a linear regression model on top of our XGBoost. This will be incorporated into the Snell Tool and allows immediate feedback upon the user's input. The following code will give us the necessary coefficients.
+```{r For UI}
+final_data_ui <- mltools::one_hot(as.data.table(final_data))
+final_data_ui <- select(final_data_ui, home_team, outs_in_inning, pitch_count, inning_count, difficulty, hitter_number, xPLG, xPLI)
+
+#Converting hitter to a factor
+final_data_ui$hitter_number <- as.factor(final_data_ui$hitter_number)
+final_data_ui <- mltools::one_hot(as.data.table(final_data_ui))
+
+#Creating the linear regression model
+
+#Split into train/test
+set.seed(617)
+final_data_train <- sample_n(final_data_ui, 8000)
+final_data_test <- anti_join(final_data_ui, final_data_train, by = c("xPLG", "xPLI", "difficulty", "pitch_count"))
+```
+Now we conduct two separate regressions - each trying to predict xPLG and xPLI. The following lines of code will give us some statistical information about our model including how valuable the important variables are. We exclude the variables that are not statistically significant.
+```{r For UI1111}
+
+#Find the coefficients for xPLG and xPLI
+summary(lm(xPLG ~ pitch_count + difficulty + hitter_number_1, data = final_data_train)) 
+summary(lm(xPLI ~ inning_count + difficulty + hitter_number_1, data = final_data_train)) 
+```
+And now we fit the coefficients for each variable and then identify the situations to pull the pitcher.
+```{r For UI1311}
+#Now use the same coefficients on the test dataset
+final_data_test$linear_xplg <- 73.102316 - 0.731067*final_data_test$pitch_count -  0.140858*final_data_test$inning_count - 0.062566*final_data_test$difficulty + 0.710064*final_data_test$hitter_number_1 + 1.183681*final_data_test$hitter_number_2 + 0.937051*final_data_test$hitter_number_4 - 1.788551*final_data_test$hitter_number_7
+final_data_test$linear_xpli <- 10.580229 - 0.490764*final_data_test$inning_count + 0.144967*final_data_test$difficulty  + 1.240506*final_data_test$hitter_number_1
+
+#Identifying when to pull the pitcher
+final_data_test$pull <- ifelse(final_data_test$linear_xplg < final_data_test$linear_xpli, 1, 0)
+```
+How similar was our model to the actual values - here are the mean residuals for each metric.
+```{r For UI1ee11}
+mean(final_data_test$xPLG - final_data_test$linear_xplg, na.rm = T)
+mean(final_data_test$xPLI - final_data_test$linear_xpli, na.rm = T)
+```
+Both are pretty small so we can be pretty satisfied that our model is accurate. And that concludes the code explanation!
+<center>
+```{r snell_image, echo=FALSE,  out.width='25%', out.height='25%'}
+knitr::include_graphics("minion.png", error = FALSE )
+```
+</center>
